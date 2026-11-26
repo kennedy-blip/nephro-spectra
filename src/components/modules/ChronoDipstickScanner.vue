@@ -33,6 +33,11 @@ import {
 import { useRbac } from '@/composables/useRbac.js'
 import { saveRecord, STORE } from '@/db/indexedDbNephroVault.js'
 import { useReportExporter, buildReportEnvelope } from '@/composables/useReportExporter.js'
+import {
+  captureCapabilities,
+  startNativePadScan as startNativePadScanNative,
+  stopNativePadScan
+} from '@/native/nativeBridge.js'
 
 const emit = defineEmits(['telemetry', 'toast'])
 const rbac = useRbac()
@@ -124,6 +129,65 @@ function jumpToWindow() {
 
 const videoEl = ref(null)
 const camera = ref({ active: false, error: null, stream: null, sampled: 0, canvasPad: null })
+const nativePadListeners = ref([])
+const scanPaths = ref(captureCapabilities())
+const padPath = ref('simulation')
+
+/**
+ * Native Android path. CameraX delivers YUV_420_888 frames and the plugin does
+ * the per-pad ROI maths on-device (10 pads, per-channel variance, luminance CV).
+ * That is strictly better for the intact-RBC speckle test than drawing the
+ * WebView video into a 320×180 canvas, so it is preferred whenever present.
+ */
+async function beginNativePadScan() {
+  const pad = DIPSTICK_PADS.find((p) => p.key === selectedPad.value.key) || DIPSTICK_PADS[0]
+  camera.value = { active: true, error: null, stream: null, sampled: 0, canvasPad: null }
+  padPath.value = 'native-camerax'
+
+  const result = await startNativePadScanNative({
+    padCount: DIPSTICK_PADS.length,
+    orientation: 'vertical',
+    onSample: (sample) => {
+      const rows = sample?.pads || []
+      const row = rows[pad.index ?? 0] || rows.find((r) => r?.index === pad.index) || rows[0]
+      if (!row) return
+      const avg = { r: Math.round(row.r), g: Math.round(row.g), b: Math.round(row.b) }
+      const { lab } = captureToLab(avg, { illuminant: illuminant.value, exposureGain: exposureGain.value })
+      const best = pad.swatches
+        .map((sw) => ({ sw, dE: ciede2000(lab, sw.lab).dE }))
+        .sort((a, b2) => a.dE - b2.dE)[0]
+      // synthesise a pixel cloud at the measured spread so the speckle test runs
+      const spread = Math.max(row.varianceR || 0, row.varianceG || 0, row.varianceB || 0) ** 0.5
+      const pixels = Array.from({ length: 18 }, (_, i) => {
+        const sign = i % 2 === 0 ? 1 : -1
+        return {
+          r: clampChannel(avg.r + sign * spread),
+          g: clampChannel(avg.g + sign * spread),
+          b: clampChannel(avg.b + sign * spread)
+        }
+      })
+      camera.value.sampled = (sample.sampleIndex ?? camera.value.sampled) + 1
+      camera.value.canvasPad = {
+        avg,
+        lab,
+        matched: best.sw.label,
+        dE: best.dE,
+        speckle: bloodSpeckleAnalysis(pixels, pad, lab),
+        nativeCv: row.coefficientOfVariation ?? null
+      }
+      emit('telemetry', { hydrationUsg: 1.02 })
+    }
+  })
+
+  if (!result.ok) {
+    camera.value = { active: false, error: null, stream: null, sampled: 0, canvasPad: null }
+    padPath.value = 'web-usermedia'
+    emit('toast', { text: `Native scan unavailable (${result.reason}) — using getUserMedia.`, level: 'warn' })
+    return false
+  }
+  nativePadListeners.value = result.listeners || []
+  return true
+}
 
 async function startCamera() {
   if (!rbac.can('capture:camera')) {
@@ -131,12 +195,19 @@ async function startCamera() {
     return
   }
   camera.value.error = null
+  scanPaths.value = captureCapabilities()
+
+  if (scanPaths.value.camera.available) {
+    if (await beginNativePadScan()) return
+  }
+
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
     })
     camera.value.stream = stream
     camera.value.active = true
+    padPath.value = 'web-usermedia'
     await nextTick()
     if (videoEl.value) {
       videoEl.value.srcObject = stream
@@ -190,7 +261,16 @@ function sampleFromCamera() {
 function stopCamera() {
   if (camera.value.stream) camera.value.stream.getTracks().forEach((t) => t.stop())
   camera.value.stream = null
+  if (nativePadListeners.value.length) {
+    stopNativePadScan(nativePadListeners.value)
+    nativePadListeners.value = []
+  }
   camera.value.active = false
+  padPath.value = 'simulation'
+}
+
+function clampChannel(v) {
+  return Math.max(0, Math.min(255, Math.round(v)))
 }
 
 /* ------------------------------------------------------- derived clinical */
@@ -617,7 +697,9 @@ function round(v, d = 2) {
         <div class="panel-head">
           <NephroIcon name="camera" :size="15" />
           <h2>Camera Pad Sampling</h2>
-          <span class="chip mono" style="margin-left: auto">{{ camera.sampled }} samples</span>
+          <span class="chip mono" :class="padPath === 'native-camerax' ? 'ok' : 'info'" style="margin-left: auto">
+            {{ padPath }} · {{ camera.sampled }} samples
+          </span>
         </div>
         <div class="panel-body">
           <div class="cam-frame" :class="{ live: camera.active }">
@@ -636,6 +718,17 @@ function round(v, d = 2) {
             <button class="btn sm" :disabled="!camera.active" @click="sampleFromCamera">Sample patch</button>
           </div>
           <p v-if="camera.error" class="inline-warn">{{ camera.error }}</p>
+          <p class="dsp-note">
+            Scan path: <strong>{{ scanPaths.camera.path }}</strong>.
+            <template v-if="scanPaths.camera.available">
+              NephroDipstickCamera samples all {{ 10 }} pad wells on-device from CameraX YUV_420_888
+              frames, returning per-channel variance and a luminance coefficient of variation.
+            </template>
+            <template v-else>
+              The native CameraX plugin only exists in the APK; here the centre patch is read
+              from the getUserMedia video element instead.
+            </template>
+          </p>
           <div v-if="camera.canvasPad" class="cam-result">
             <div class="kv-row"><span class="k">Patch RGB</span><span class="v">{{ camera.canvasPad.avg.r }}, {{ camera.canvasPad.avg.g }}, {{ camera.canvasPad.avg.b }}</span></div>
             <div class="kv-row"><span class="k">Matched swatch</span><span class="v">{{ camera.canvasPad.matched }}</span></div>

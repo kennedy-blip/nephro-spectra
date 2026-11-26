@@ -13,6 +13,6 @@ ext {
     androidxJunitVersion = '1.2.1'
     androidxEspressoCoreVersion = '3.6.1'
     cordovaAndroidVersion = '10.1.1'
-    // CameraX — required by NephroDipstickCameraPlugin
+    // Required by NephroDipstickCameraPlugin (CameraX YUV_420_888 analysis).
     cameraxVersion = '1.3.4'
 }

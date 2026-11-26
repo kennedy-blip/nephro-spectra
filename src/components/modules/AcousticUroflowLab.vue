@@ -35,6 +35,11 @@ import { peakFlow, estimateNoiseFloor, runtimeInfo } from '@/engines/rustNephroB
 import { useRbac } from '@/composables/useRbac.js'
 import { saveRecord, STORE } from '@/db/indexedDbNephroVault.js'
 import { useReportExporter, buildReportEnvelope } from '@/composables/useReportExporter.js'
+import {
+  captureCapabilities,
+  startNativeAcousticCapture,
+  stopNativeAcousticCapture
+} from '@/native/nativeBridge.js'
 
 const emit = defineEmits(['telemetry', 'toast'])
 
@@ -212,6 +217,73 @@ const micTrace = ref([])
 const micStart = ref(0)
 const micQMax = ref(0)
 const micAnalyser = ref(null)
+const nativeListeners = ref([])
+const capturePaths = ref(captureCapabilities())
+const capturePath = ref('simulation')
+
+/** Report which hardware path this environment can actually use. */
+function refreshCapturePaths() {
+  capturePaths.value = captureCapabilities()
+}
+
+/**
+ * Native Android path: NephroAcousticFlow delivers true 48 kHz PCM frames straight
+ * from AudioRecord, which is the only way to get an un-resampled microphone
+ * stream inside a WebView. It falls through to Web Audio when unavailable.
+ */
+async function startNativeCapture() {
+  const analyzer = new AcousticUroflowAnalyzer({
+    sampleRate: 48000,
+    posture: posture.value,
+    kCal: kCalScale.value
+  })
+  micTrace.value = []
+  micQMax.value = 0
+  micState.value = { active: true, error: null, level: 0, frames: 0 }
+  capturePath.value = 'native-48khz'
+  micStart.value = performance.now()
+  let calibrated = false
+
+  const result = await startNativeAcousticCapture({
+    posture: posture.value,
+    calibrationMs: 1600,
+    onNoiseFloor: () => {
+      calibrated = true
+      dspState.value.calibrationFrames = 8
+      emit('toast', { text: 'Native noise floor locked — AudioRecord 48 kHz jet capture.', level: 'normal' })
+    },
+    onFrame: (frame) => {
+      micState.value.frames = frame.frameIndex ?? micState.value.frames + 1
+      micState.value.level = round((frame.rms ?? 0) * 100, 2)
+      if (!calibrated) {
+        dspState.value.calibrationFrames = Math.min(8, Math.round((frame.frameIndex ?? 0) / 8))
+        return
+      }
+      micQMax.value = Math.max(micQMax.value, frame.peakFlowMlSec ?? 0)
+      const q = frame.instantFlowMlSec ?? 0
+      const t = (performance.now() - micStart.value) / 1000
+      if (Number.isFinite(q) && q > 0) {
+        micTrace.value = [...micTrace.value, { t: round(t, 2), q: round(q, 2) }].slice(-80)
+      }
+      dspState.value = {
+        ...dspState.value,
+        mode: 'native-android',
+        sampleRate: frame.sampleRate ?? 48000,
+        frames: micState.value.frames
+      }
+      emit('telemetry', { flowRateMlSec: q })
+    }
+  })
+
+  if (!result.ok) {
+    micState.value = { active: false, error: null, level: 0, frames: 0 }
+    emit('toast', { text: `Native capture unavailable (${result.reason}) — using Web Audio.`, level: 'warn' })
+    capturePath.value = 'web-audio'
+    return false
+  }
+  nativeListeners.value = result.listeners || []
+  return true
+}
 
 async function startMicrophone() {
   if (!rbac.can('capture:microphone')) {
@@ -219,6 +291,15 @@ async function startMicrophone() {
     return
   }
   micState.value = { active: false, error: null, level: 0, frames: 0 }
+  refreshCapturePaths()
+
+  // Prefer the native plugin when the APK is hosting us.
+  if (capturePaths.value.acoustic.available) {
+    const ok = await startNativeCapture()
+    if (ok) return
+    micState.value = { active: false, error: null, level: 0, frames: 0 }
+  }
+
   try {
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 })
     await audioCtx.resume()
@@ -232,6 +313,7 @@ async function startMicrophone() {
     micNode.connect(analyser)
     micAnalyser.value = analyser
 
+    capturePath.value = 'web-audio'
     const analyzer = new AcousticUroflowAnalyzer({ sampleRate: audioCtx.sampleRate, posture: posture.value, kCal: kCalScale.value })
     // 8 baseline frames (≈1.5 s) of ambient noise
     const buf = new Float32Array(2048)
@@ -280,6 +362,7 @@ async function startMicrophone() {
       ? 'Microphone permission denied — the 1-Tap simulator remains fully live.'
       : `Capture unavailable (${err?.message || err}). The simulator path is unaffected.`
     micState.value.active = false
+    capturePath.value = 'simulation'
     emit('toast', { text: micState.value.error, level: 'warn' })
   }
 }
@@ -291,6 +374,11 @@ function stopMicrophone() {
   micStream = null
   analyser = null
   micState.value.active = false
+  if (nativeListeners.value.length) {
+    stopNativeAcousticCapture(nativeListeners.value)
+    nativeListeners.value = []
+  }
+  capturePath.value = 'simulation'
 }
 
 /* -------------------------------------------------------------- IPSS */
@@ -720,8 +808,22 @@ setTimeout(() => {
             <span class="chip mono" :class="micState.active ? 'ok' : 'info'">
               cal {{ dspState.calibrationFrames }}/8 · lvl {{ micState.level }}
             </span>
+            <span class="chip mono" :class="capturePath === 'native-48khz' ? 'ok' : 'info'">
+              {{ capturePath }}
+            </span>
           </div>
           <p v-if="micState.error" class="inline-warn">{{ micState.error }}</p>
+          <p class="dsp-note">
+            Capture path: <strong>{{ capturePaths.acoustic.path }}</strong>.
+            <template v-if="capturePaths.acoustic.available">
+              The packaged APK is hosting this page, so NephroAcousticFlow streams un-resampled
+              48 kHz PCM straight from AudioRecord.
+            </template>
+            <template v-else>
+              NephroAcousticFlow is only present in the APK; in the browser the graph runs on
+              Web Audio (which may resample to the device rate, reported below).
+            </template>
+          </p>
           <p class="dsp-note">
             Acoustic recovery inverts the transfer function Q = k·P<sup>0.58</sup> over a
             {{ dspState.windowSeconds }} s window at k = 1350 (Hann/Welch PSD in Pa²/Hz). A real capture

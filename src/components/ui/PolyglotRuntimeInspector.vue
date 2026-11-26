@@ -6,11 +6,12 @@
  * IndexedDB vault census, the Go serverless mirrors, the Java Capacitor plugin
  * bridge and the benchmarked FFT throughput.
  */
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import NephroIcon from './NephroIcon.vue'
 import { runtimeInfo, initRustNephro, benchmarkFFT } from '@/engines/rustNephroBridge.js'
 import { vaultCensus, STORE_META, flushOutbox } from '@/db/indexedDbNephroVault.js'
 import { useRbac } from '@/composables/useRbac.js'
+import { captureCapabilities } from '@/native/nativeBridge.js'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -22,6 +23,7 @@ const emit = defineEmits(['close', 'toast'])
 const rbac = useRbac()
 
 const rust = ref(runtimeInfo())
+const native = ref(captureCapabilities())
 const bench = ref(null)
 const census = ref(null)
 const busy = ref(false)
@@ -70,9 +72,11 @@ const langs = computed(() => [
     icon: 'phone',
     share: '4.9%',
     role: 'Capacitor native plugins (acoustic flow + camera pad capture)',
-    files: 'NephroAcousticFlowPlugin · NephroDipstickCameraPlugin · MainActivity (729 lines)',
-    state: 'apk-only',
-    tone: 'info'
+    files: native.value.acoustic.available
+      ? 'NephroAcousticFlow + NephroDipstickCamera bound to this WebView'
+      : 'NephroAcousticFlowPlugin · NephroDipstickCameraPlugin · MainActivity (729 lines)',
+    state: native.value.acoustic.available ? 'plugins-bound' : 'apk-only',
+    tone: native.value.acoustic.available ? 'ok' : 'info'
   },
   {
     lang: 'Go 1.22',
@@ -103,6 +107,15 @@ const storeRows = computed(() => {
     count: census.value.records[key] ?? 0
   }))
 })
+
+watch(
+  () => props.open,
+  (isOpen) => {
+    if (!isOpen) return
+    native.value = captureCapabilities()
+    rust.value = runtimeInfo()
+  }
+)
 
 async function runBench() {
   busy.value = true

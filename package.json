@@ -10,15 +10,23 @@
     "preview": "vite preview --host 0.0.0.0",
     "cap:sync": "npx cap sync android",
     "apk": "npx cap sync android && cd android && ./gradlew assembleRelease",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run && npm run lint:workflow && npm run test:java",
+    "test:watch": "vitest",
+    "test:java": "node scripts/check-java.mjs",
+    "lint:workflow": "node scripts/lint-workflow.mjs",
+    "verify": "npm run test && npm run build"
   },
   "dependencies": {
     "vue": "^3.5.13"
   },
   "devDependencies": {
+    "@capacitor/android": "^6.2.4",
+    "@capacitor/cli": "^6.2.4",
+    "@capacitor/core": "^6.2.4",
     "@vitejs/plugin-vue": "^5.2.1",
     "@vue/test-utils": "^2.4.6",
+    "java-parser": "^3.0.1",
+    "js-yaml": "^5.5.0",
     "jsdom": "^25.0.1",
     "vite": "^6.0.7",
     "vitest": "^2.1.8"

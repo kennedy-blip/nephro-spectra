@@ -199,7 +199,7 @@ function generateFallbackApk() {
 appId=com.nephrospectra.clinical
 webDir=dist
 engines=acoustic-uroflow,dipstick-ciede2000,stone-tiselius,glycemic-rk4,kdigo-egfr
-plugins=NephroAcousticFlowPlugin,NephroDipstickCameraPlugin
+plugins=com.nephrospectra.plugins.NephroAcousticFlowPlugin,com.nephrospectra.plugins.NephroDipstickCameraPlugin
 vault=nephro_spectra_vault_v1
 generatedBy=one-tap-bundler
 `

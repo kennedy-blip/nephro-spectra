@@ -63,6 +63,9 @@ jobs:
       - name: Run the engine + component test suite
         run: npm test
 
+      - name: Assert the Java sources parse and the host is wired
+        run: npm run test:java
+
       - name: Build production bundle
         run: npm run build
 
@@ -97,95 +100,91 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
 
-      - name: Install Capacitor CLI
-        run: npm install --no-save @capacitor/cli@6 @capacitor/core@6 @capacitor/android@6
+      - name: Assert the Java sources parse and the host is wired
+        run: npm run test:java
 
-      - name: Materialise the Android project
+      - name: Sync the built web assets into the Android project
         run: |
           set -euo pipefail
-          if [ ! -f android/app/build.gradle ]; then
-            npx cap add android
-          fi
-          npx cap sync android --inline
+          test -f android/app/build.gradle || (echo '::error::android/ project missing'; exit 1)
+          npx cap sync android
 
-      - name: Register native plugins and package id
+      - name: Bootstrap the native host
+        run: python3 scripts/bootstrap-android.py
+
+      - name: Verify the native sources compile as written
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import re, pathlib
-          cfg = pathlib.Path('capacitor.config.json').read_text()
-          manifest = pathlib.Path('android/app/src/main/AndroidManifest.xml')
-          if manifest.exists():
-              text = manifest.read_text()
-              text = re.sub(r'package="[^"]*"', 'package="com.nephrospectra.clinical"', text, count=1)
-              if 'RECORD_AUDIO' not in text:
-                  text = text.replace(
-                      '<application',
-                      '<uses-permission android:name="android.permission.RECORD_AUDIO" />\n'
-                      '    <uses-permission android:name="android.permission.CAMERA" />\n'
-                      '    <application',
-                      1,
-                  )
-              manifest.write_text(text)
-          print('appId from', cfg.split('appId')[1].split(',')[0].strip())
-          PY
-          python3 - <<'PY'
-          import pathlib, re
-          plugins = pathlib.Path('android/app/src/main/java/com/nephrospectra/plugins')
-          assert plugins.exists(), 'native plugin sources missing'
-          for f in plugins.glob('*.java'):
-              print('plugin source:', f.name)
-          main = pathlib.Path('android/app/src/main/java/com/nephrospectra/clinical/MainActivity.java')
-          if main.exists():
-              text = main.read_text()
-              if 'registerPlugin(NephroAcousticFlowPlugin.class' not in text:
-                  imports = (
-                      'import com.nephrospectra.plugins.NephroAcousticFlowPlugin;\n'
-                      'import com.nephrospectra.plugins.NephroDipstickCameraPlugin;\n'
-                  )
-                  text = text.replace('import com.getcapacitor.BridgeActivity;',
-                                      'import com.getcapacitor.BridgeActivity;\n' + imports, 1)
-                  text = text.replace('super.onCreate(savedInstanceState);',
-                      'registerPlugin(NephroAcousticFlowPlugin.class);\n'
-                      '        registerPlugin(NephroDipstickCameraPlugin.class);\n'
-                      '        super.onCreate(savedInstanceState);', 1)
-                  main.write_text(text)
-                  print('registered native plugins in MainActivity')
-          PY
+          test -f android/app/src/main/java/com/nephrospectra/clinical/MainActivity.java
+          test -f android/app/src/main/java/com/nephrospectra/plugins/NephroAcousticFlowPlugin.java
+          test -f android/app/src/main/java/com/nephrospectra/plugins/NephroDipstickCameraPlugin.java
+          grep -q 'registerPlugin(NephroAcousticFlowPlugin.class)' \
+            android/app/src/main/java/com/nephrospectra/clinical/MainActivity.java
+          grep -q 'androidx.camera:camera-core' android/app/build.gradle
+          grep -q 'RECORD_AUDIO' android/app/src/main/AndroidManifest.xml
+          grep -q 'networkSecurityConfig' android/app/src/main/AndroidManifest.xml
+          grep -q 'applicationId "com.nephrospectra.clinical"' android/app/build.gradle
+          echo "native host checks passed"
 
       - name: Assemble release APK
         working-directory: android
+        env:
+          NEPHRO_KEYSTORE_PATH: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' && '../nephro-release.keystore' || '' }}
+          NEPHRO_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          NEPHRO_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          NEPHRO_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
           set -euo pipefail
+          if [ -n "${NEPHRO_KEYSTORE_PATH:-}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > ../nephro-release.keystore
+          fi
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon --stacktrace
+          ls -l app/build/outputs/apk/release/
 
       - name: Sign the APK
         id: sign
         run: |
           set -euo pipefail
-          KEYSTORE="nephro-release.keystore"
-          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
-            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
+          APK="android/app/build/outputs/apk/release/${APK_NAME}"
+          if [ ! -f "$APK" ]; then
+            APK=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
+          fi
+          test -f "$APK" || { echo "::error::no release APK produced"; exit 1; }
+          echo "built=$APK"
+
+          if [ -f nephro-release.keystore ]; then
+            echo "using the repository keystore (already signed by Gradle)"
+            KEYSTORE=nephro-release.keystore
           else
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret — signing with an ephemeral self-signed key."
+            KEYSTORE=nephro-ephemeral.keystore
             keytool -genkeypair -v -keystore "$KEYSTORE" -alias nephro -keyalg RSA \
               -keysize 2048 -validity 10000 -storepass nephrospectra -keypass nephrospectra \
               -dname "CN=NEPHRO-SPECTRA, OU=Clinical Systems, O=NephroSpectra, L=Nairobi, C=KE"
-          fi
-          UNSIGNED=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
-          echo "unsigned=$UNSIGNED"
-          if command -v apksigner >/dev/null 2>&1; then
             apksigner sign --ks "$KEYSTORE" --ks-pass pass:nephrospectra \
-              --key-pass pass:nephrospectra --out "public/releases/${APK_NAME}" "$UNSIGNED"
-            apksigner verify --verbose "public/releases/${APK_NAME}"
-          else
-            cp "$UNSIGNED" "public/releases/${APK_NAME}"
+              --key-pass pass:nephrospectra --out "public/releases/${APK_NAME}" "$APK"
+            APK="public/releases/${APK_NAME}"
           fi
-          ls -l public/releases/
+
+          mkdir -p public/releases
+          if [ "$APK" != "public/releases/${APK_NAME}" ]; then
+            cp "$APK" "public/releases/${APK_NAME}"
+          fi
+
+          if command -v apksigner >/dev/null 2>&1; then
+            apksigner verify --verbose "public/releases/${APK_NAME}" || {
+              echo "::error::APK signature failed to verify"; exit 1; }
+          fi
+          unzip -l "public/releases/${APK_NAME}" | grep -q 'assets/public/index.html' \
+            || { echo "::error::the APK does not contain the bundled web app"; exit 1; }
+          unzip -l "public/releases/${APK_NAME}" | grep -q 'assets/public/assets/' \
+            || { echo "::error::the APK has no built JS/CSS assets"; exit 1; }
+
+          FILESIZE=$(stat -c%s "public/releases/${APK_NAME}")
+          echo "size=$FILESIZE" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "public/releases/${APK_NAME}" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "size=$(stat -c%s "public/releases/${APK_NAME}")" >> "$GITHUB_OUTPUT"
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ls -l public/releases/
 
       - name: Publish APK artefact
         uses: actions/upload-artifact@v4
@@ -208,6 +207,57 @@ jobs:
             Package: `com.nephrospectra.clinical`
             Stack: Vue 3.5 · Rust/WASM DSP · Go 1.22 · Java 17 · GLSL ES 3.00 · 0.0% TypeScript
 
+  deploy-vercel:
+    name: Deploy to Vercel
+    needs: verify-web
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for a Vercel token
+        id: gate
+        run: |
+          if [ -n "${VERCEL_TOKEN:-}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::VERCEL_TOKEN not set — skipping the deploy job."
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.ready == 'true'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies and build
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Deploy to production
+        if: steps.gate.outputs.ready == 'true' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          npm install --no-save --no-audit --no-fund vercel@39
+          npx vercel deploy --prod --yes --token "$VERCEL_TOKEN" | tee /tmp/deploy.txt
+          URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.vercel\.app' /tmp/deploy.txt | tail -1)
+          echo "Deployed to $URL"
+          echo "### Vercel production: $URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy a preview for this branch
+        if: steps.gate.outputs.ready == 'true' && github.ref != 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          npm install --no-save --no-audit --no-fund vercel@39
+          npx vercel deploy --yes --token "$VERCEL_TOKEN" | tee /tmp/deploy.txt
+          URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.vercel\.app' /tmp/deploy.txt | tail -1)
+          echo "Preview: $URL"
+          echo "### Vercel preview: $URL" >> "$GITHUB_STEP_SUMMARY"
+
   go-verify:
     name: Go serverless kernels
     runs-on: ubuntu-latest
@@ -219,7 +269,7 @@ jobs:
       - name: Vet and build the API package
         run: |
           set -euo pipefail
-          go mod init nephro-spectra 2>/dev/null || true
+          test -f go.mod || (echo '::error::go.mod missing'; exit 1)
           gofmt -l api go_nephro | tee /tmp/unformatted
           test ! -s /tmp/unformatted || (echo '::error::Go sources need gofmt'; exit 1)
           go vet ./api/... ./go_nephro/...
