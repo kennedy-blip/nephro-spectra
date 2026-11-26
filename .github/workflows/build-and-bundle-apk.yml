@@ -321,7 +321,9 @@ jobs:
       - name: Test the DSP crate
         working-directory: rust-nephro
         run: |
-          set -o pipefail
+          # GitHub runs bash with -e, which aborts the step the moment the
+          # pipeline fails — before PIPESTATUS can be read. Disable it here.
+          set +e -o pipefail
           cargo test --release --lib 2>&1 | tee /tmp/cargo-test.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
@@ -338,7 +340,7 @@ jobs:
         if: success()
         working-directory: rust-nephro
         run: |
-          set -o pipefail
+          set +e -o pipefail
           cargo build --release --target wasm32-unknown-unknown 2>&1 | tee /tmp/cargo-build.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
