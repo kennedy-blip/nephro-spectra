@@ -56,7 +56,8 @@ pub fn analyse_frame(frame: &[f64], noise_floor: &[f64], k_cal: f64) -> FrameRes
         jet_power: p,
         flow_ml_s: flow_from_power(p, k_cal, GAMMA_JET),
         centroid_hz: centroid,
-        bubble_radius_um: minnaert_radius_um(centroid) * 1e6,
+        // minnaert_radius_um already returns micrometres
+        bubble_radius_um: minnaert_radius_um(centroid),
         dominant_hz: dominant,
         snr_db: snr,
     }
@@ -131,10 +132,14 @@ mod tests {
 
     #[test]
     fn minnaert_roundtrip() {
+        // Both helpers speak micrometres; 4200 Hz is a ≈781.7 µm bubble.
         let f = 4200.0;
-        let r = minnaert_radius_um(f);
-        let back = minnaert_frequency_hz(r * 1e-6);
-        assert!((back - f).abs() < 1e-6 * f);
+        let r_um = minnaert_radius_um(f);
+        assert!((r_um - 781.72).abs() < 0.5, "r_um={r_um}");
+        let back = minnaert_frequency_hz(r_um);
+        assert!((back - f).abs() < 1e-6 * f, "back={back}");
+        // and the metre-space helpers agree with the micrometre ones
+        assert!((minnaert_frequency_hz_m(r_um * 1e-6) - f).abs() < 1e-6 * f);
     }
 
     #[test]

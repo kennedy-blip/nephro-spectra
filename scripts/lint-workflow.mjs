@@ -85,7 +85,7 @@ for (const file of files) {
     assert(text.includes('${APK_NAME}') || text.includes(APK), `build-apk uses the pinned APK name`)
     assert(text.includes('assets/public/assets/'), 'build-apk asserts the built JS/CSS is inside the APK')
     assert(text.includes('assembleRelease'), 'build-apk runs a Gradle release build')
-    assert(text.includes('apksigner verify'), 'build-apk verifies the signature')
+    assert(text.includes('verify --verbose'), 'build-apk verifies the APK signature')
     assert(text.includes('assets/public/index.html'), 'build-apk asserts the web app is inside the APK')
     assert(text.includes('test:java'), 'build-apk gates on the Java sources parsing')
     assert(text.includes('actions/upload-artifact'), 'build-apk publishes an artefact')

@@ -115,6 +115,15 @@ jobs:
             echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
             export ANDROID_HOME="$SDK"
           fi
+          # apksigner and zipalign live in the newest build-tools directory.
+          BUILD_TOOLS=$(ls -d "${ANDROID_HOME}"/build-tools/* 2>/dev/null | sort -V | tail -1)
+          if [ -n "${BUILD_TOOLS:-}" ]; then
+            echo "BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
+            echo "$BUILD_TOOLS" >> "$GITHUB_PATH"
+            echo "build-tools: $BUILD_TOOLS"
+          else
+            echo "::warning::no build-tools directory — apksigner may be unavailable"
+          fi
           echo "sdk.dir=${ANDROID_HOME}" > android/local.properties
           echo "--- local.properties ---"; cat android/local.properties
           ls "${ANDROID_HOME}/platforms" 2>/dev/null || echo "::warning::no platforms directory yet"
@@ -183,8 +192,22 @@ jobs:
           test -f "$APK" || { echo "::error::no release APK produced"; exit 1; }
           echo "built=$APK"
 
+          # apksigner ships inside the SDK build-tools; resolve it explicitly so a
+          # bare PATH does not turn signing into exit 127.
+          APKSIGNER=""
+          if [ -n "${BUILD_TOOLS:-}" ] && [ -x "${BUILD_TOOLS}/apksigner" ]; then
+            APKSIGNER="${BUILD_TOOLS}/apksigner"
+          elif command -v apksigner >/dev/null 2>&1; then
+            APKSIGNER=$(command -v apksigner)
+          else
+            CANDIDATE=$(ls -d "${ANDROID_HOME:-}"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+            [ -n "$CANDIDATE" ] && APKSIGNER="$CANDIDATE"
+          fi
+          echo "apksigner: ${APKSIGNER:-not found}"
+          echo "keytool: $(command -v keytool || echo 'not found')"
+
           if [ -f nephro-release.keystore ]; then
-            echo "using the repository keystore (already signed by Gradle)"
+            echo "using the repository keystore (Gradle already signed this build)"
             KEYSTORE=nephro-release.keystore
           else
             echo "::warning::No ANDROID_KEYSTORE_BASE64 secret — signing with an ephemeral self-signed key."
@@ -192,7 +215,11 @@ jobs:
             keytool -genkeypair -v -keystore "$KEYSTORE" -alias nephro -keyalg RSA \
               -keysize 2048 -validity 10000 -storepass nephrospectra -keypass nephrospectra \
               -dname "CN=NEPHRO-SPECTRA, OU=Clinical Systems, O=NephroSpectra, L=Nairobi, C=KE"
-            apksigner sign --ks "$KEYSTORE" --ks-pass pass:nephrospectra \
+            if [ -z "$APKSIGNER" ]; then
+              echo "::error::apksigner is unavailable — cannot produce an installable APK"
+              exit 1
+            fi
+            "$APKSIGNER" sign --ks "$KEYSTORE" --ks-pass pass:nephrospectra \
               --key-pass pass:nephrospectra --out "public/releases/${APK_NAME}" "$APK"
             APK="public/releases/${APK_NAME}"
           fi
@@ -202,9 +229,11 @@ jobs:
             cp "$APK" "public/releases/${APK_NAME}"
           fi
 
-          if command -v apksigner >/dev/null 2>&1; then
-            apksigner verify --verbose "public/releases/${APK_NAME}" || {
+          if [ -n "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --verbose "public/releases/${APK_NAME}" || {
               echo "::error::APK signature failed to verify"; exit 1; }
+          else
+            echo "::warning::apksigner unavailable — skipping signature verification"
           fi
           unzip -l "public/releases/${APK_NAME}" | grep -q 'assets/public/index.html' \
             || { echo "::error::the APK does not contain the bundled web app"; exit 1; }
@@ -331,7 +360,7 @@ jobs:
             head -c 600 /tmp/cargo-test.log | sed 's/^/  /'
             # Encode the diagnostics in the artifact name: names are readable
             # through the API even when job logs are not.
-            SLUG="lines$(wc -l < /tmp/cargo-test.log)-bytes$(wc -c < /tmp/cargo-test.log)-tail-$(tail -6 /tmp/cargo-test.log | tr '\n' ' ' | tr -c 'A-Za-z0-9 .:_-' '_' | cut -c1-150)" 
+            SLUG="tail-$(tail -4 /tmp/cargo-test.log | tr '\n' ' ' | tr -c 'A-Za-z0-9._-' '_' | cut -c1-120)"
             echo "CARGO_FAIL_SLUG=${SLUG:-unknown}" >> "$GITHUB_ENV"
             echo "::error::cargo test: ${SLUG:-unknown}"
             exit "$status"

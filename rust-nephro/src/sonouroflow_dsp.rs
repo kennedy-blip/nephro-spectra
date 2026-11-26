@@ -145,8 +145,16 @@ pub fn solve_calibration(reference_power: f64, target_qmax: f64, gamma: f64) -> 
     }
 }
 
-/// Minnaert natural bubble resonance frequency (Hz) for radius `r` (metres).
-pub fn minnaert_frequency_hz(r: f64) -> f64 {
+/// Minnaert natural bubble resonance frequency (Hz) for a bubble radius in
+/// **micrometres** — the unit the engine reports.
+///
+/// `f = (1/2πr)·sqrt(3γP₀/ρ)`, converted from µm to m internally.
+pub fn minnaert_frequency_hz(radius_um: f64) -> f64 {
+    minnaert_frequency_hz_m(radius_um * 1e-6)
+}
+
+/// Minnaert resonance frequency (Hz) for a radius given in **metres**.
+pub fn minnaert_frequency_hz_m(r: f64) -> f64 {
     if r <= 0.0 {
         return 0.0;
     }
@@ -156,7 +164,11 @@ pub fn minnaert_frequency_hz(r: f64) -> f64 {
     (1.0 / (2.0 * core::f64::consts::PI * r)) * ((3.0 * GAMMA * P0) / RHO).sqrt()
 }
 
-/// Bubble radius (µm) whose Minnaert tone equals `f` (Hz).
+/// Bubble radius (**µm**) whose Minnaert tone equals `f` (Hz).
+///
+/// Returns micrometres — the inverse of [`minnaert_frequency_hz`]. For a 4200 Hz
+/// tone this is ≈781.7 µm. (It previously returned metres despite the name, and
+/// its own round-trip assertion failed by a factor of 1e6.)
 pub fn minnaert_radius_um(f: f64) -> f64 {
     if f <= 0.0 {
         return 0.0;
@@ -164,7 +176,7 @@ pub fn minnaert_radius_um(f: f64) -> f64 {
     const GAMMA: f64 = 1.4;
     const P0: f64 = 101_325.0;
     const RHO: f64 = 1000.0;
-    (1.0 / (2.0 * core::f64::consts::PI * f)) * ((3.0 * GAMMA * P0) / RHO).sqrt()
+    (1.0 / (2.0 * core::f64::consts::PI * f)) * ((3.0 * GAMMA * P0) / RHO).sqrt() * 1e6
 }
 
 /// Spectral centroid (Hz) — the power-weighted mean frequency.
