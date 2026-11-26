@@ -375,13 +375,21 @@ mod tests {
 
     #[test]
     fn morphology_matches_the_js_engine() {
-        // The five presets in VOIDING_PRESETS, with the values the JS engine
-        // derives for each (see tests/engines.spec.js).
-        assert_eq!(classify_morphology(&features(22.0, 5.4, 26.5, 0.52, 0.42, 0)), MORPH_NORMAL);
-        assert_eq!(classify_morphology(&features(8.4, 6.1, 52.0, 0.61, 1.9, 0)), MORPH_BPH);
-        assert_eq!(classify_morphology(&features(11.2, 3.1, 27.0, 0.88, -1.6, 0)), MORPH_STRICTURE);
-        assert_eq!(classify_morphology(&features(7.0, 12.0, 48.0, 0.70, 0.2, 0)), MORPH_UNDERACTIVE);
-        assert_eq!(classify_morphology(&features(15.0, 6.0, 44.0, 0.75, 0.8, 5)), MORPH_DYSSYNERGIA);
+        // The exact features `computeBiometrics()` derives from each of the five
+        // VOIDING_PRESETS, printed from the JS engine. If these ever disagree the
+        // two implementations have drifted: the whole point is parity.
+        let cases = [
+            // qMax, tQmax, tFlow, plateau, skew, interruptions, expected
+            (22.32, 10.27, 36.04, 0.523, 0.017, 0usize, MORPH_NORMAL),
+            (8.72, 8.92, 54.72, 0.555, -0.131, 0, MORPH_BPH),
+            (11.60, 11.47, 20.52, 0.882, -2.19, 0, MORPH_STRICTURE),
+            (7.28, 19.80, 37.36, 0.662, -0.58, 0, MORPH_UNDERACTIVE),
+            (15.42, 19.55, 26.64, 0.585, -0.534, 3, MORPH_DYSSYNERGIA),
+        ];
+        for (q, tq, tf, plateau, skew, n_int, expected) in cases {
+            let got = classify_morphology(&features(q, tq, tf, plateau, skew, n_int));
+            assert_eq!(got, expected, "q={q} tQmax={tq} tFlow={tf} plateau={plateau} skew={skew} n={n_int}");
+        }
     }
 
     #[test]
