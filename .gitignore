@@ -35,3 +35,6 @@ npm-debug.log*
 # test output
 coverage/
 .vitest/
+
+# vite cache
+.vite/
