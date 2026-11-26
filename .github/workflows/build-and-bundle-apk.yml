@@ -320,13 +320,12 @@ jobs:
           cargo test --release --lib 2>&1 | tee /tmp/cargo-test.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
-            # Job logs are not always retrievable, but annotations are, so emit
-            # every diagnostic as its own annotation.
-            grep -nE "^error|panicked at|FAILED|^test .* FAILED|assertion|--> |cannot find|mismatched|expected|left |right " \
-              /tmp/cargo-test.log | head -40 | while IFS= read -r line; do
-                echo "::error::cargo test: ${line}"
-              done
-            echo "::error::cargo test failed with exit $status"
+            # Encode the diagnostics in the artifact name: names are readable
+            # through the API even when job logs are not.
+            SLUG=$(grep -E "^error|panicked at|FAILED" /tmp/cargo-test.log \
+              | head -4 | tr '\n' ' ' | tr -c 'A-Za-z0-9 .:_-' '_' | cut -c1-120)
+            echo "CARGO_FAIL_SLUG=${SLUG:-unknown}" >> "$GITHUB_ENV"
+            echo "::error::cargo test: ${SLUG:-unknown}"
             exit "$status"
           fi
       - name: Build the WASM artefact
@@ -344,7 +343,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: cargo-logs
+          name: cargo-logs-${{ env.CARGO_FAIL_SLUG || 'unknown' }}
           path: |
             /tmp/cargo-test.log
             /tmp/cargo-build.log
