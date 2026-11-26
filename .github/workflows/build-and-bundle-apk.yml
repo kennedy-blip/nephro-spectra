@@ -320,6 +320,8 @@ jobs:
           cargo test --release --lib 2>&1 | tee /tmp/cargo-test.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
+            echo "::notice::cargo test exit=$status log=$(wc -c < /tmp/cargo-test.log) bytes"
+            head -c 600 /tmp/cargo-test.log | sed 's/^/  /'
             # Encode the diagnostics in the artifact name: names are readable
             # through the API even when job logs are not.
             SLUG="lines$(wc -l < /tmp/cargo-test.log)-bytes$(wc -c < /tmp/cargo-test.log)-tail-$(tail -6 /tmp/cargo-test.log | tr '\n' ' ' | tr -c 'A-Za-z0-9 .:_-' '_' | cut -c1-150)" 
@@ -328,6 +330,7 @@ jobs:
             exit "$status"
           fi
       - name: Build the WASM artefact
+        if: success()
         working-directory: rust-nephro
         run: |
           set -o pipefail
