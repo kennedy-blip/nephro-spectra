@@ -333,6 +333,7 @@ export function kurtosis(xs) {
 }
 
 function round(v, d = 2) {
+  if (!Number.isFinite(v)) return 0
   const f = 10 ** d
   return Math.round((v + Number.EPSILON) * f) / f
 }
@@ -412,8 +413,17 @@ export function computeBiometrics(trace, { sex = 'male', age = 45 } = {}) {
   })()
 
   const morphology = classifyMorphology({
-    qMax, qAvg, tQmax, tFlow, plateauRatio, skew, kurt,
-    interruptionCount, acceleration, decayRatio, sex
+    qMax,
+    qAvg,
+    tQmax,
+    tFlow,
+    plateauRatio,
+    skewness: skew,
+    kurtosis: kurt,
+    interruptionCount,
+    acceleration,
+    decayRatio,
+    sex
   })
 
   const nomogram = sirokyPosition(vVoided, qMax, sex)
@@ -478,9 +488,18 @@ function buildFlags(m) {
  */
 export function classifyMorphology(m) {
   const {
-    qMax, tQmax, tFlow, plateauRatio, skewness: skew, kurtosis: kurt,
-    interruptionCount = 0, sex = 'male'
+    qMax,
+    tQmax,
+    tFlow,
+    plateauRatio,
+    interruptionCount = 0,
+    sex = 'male'
   } = m
+  // A missing or non-finite shape moment must degrade to "no evidence", never to
+  // NaN: `Math.abs(NaN) < 0.9` is false, which would silently disable the rule.
+  const finite = (v, fallback = 0) => (Number.isFinite(v) ? v : fallback)
+  const skew = finite(m.skewness)
+  const kurt = finite(m.kurtosis)
   const normalThreshold = sex === 'female' ? 20 : 15
   const tRatio = tFlow > 0 ? tQmax / tFlow : 0.5
   const scores = {

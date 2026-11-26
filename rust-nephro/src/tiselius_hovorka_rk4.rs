@@ -95,7 +95,7 @@ impl Default for HovorkaParams {
             e_gp0: 0.0161 * 78.0,
             s_i_td: 0.0055,
             rtg_mg_dl: 180.0,
-            renal_max_mg_min: 120.0,
+            renal_max_mg_min: 70.0,
         }
     }
 }
@@ -104,10 +104,14 @@ const MMOL_PER_MG_DL: f64 = 1.0 / 18.0;
 
 impl HovorkaParams {
     /// SGLT2 inhibitor engaged: RTG drops to 75 mg/dL and max excretion rises.
+    ///
+    /// `renal_max_mg_min` is 70 mg/min at baseline (≈3.9 mmol/min, the accepted
+    /// maximal tubular reabsorption) and 150 mg/min under blockade — matching
+    /// `renalMaxMgMin` in src/engines/rustNephroBridge.js.
     pub fn with_sglt2(mut self, engaged: bool) -> Self {
         if engaged {
             self.rtg_mg_dl = 75.0;
-            self.renal_max_mg_min = 260.0;
+            self.renal_max_mg_min = 150.0;
         }
         self
     }
@@ -277,26 +281,50 @@ pub fn glucose_ketone_index(glucose_mmol: f64, ketones_mmol: f64) -> f64 {
     }
 }
 
-/// Tiselius activity product for calcium oxalate: `AP(CaOx) = Ca × Ox`.
-pub fn ap_caox(calcium_mmol: f64, oxalate_mmol: f64, volume_l: f64) -> f64 {
+/// Tiselius activity product for calcium oxalate.
+///
+/// `AP(CaOx) = K_CaOx · Ca^1.07 · Ox^0.68 · Mg^-0.18 · Cit^-0.12 · V^-1.31`
+///
+/// The exponents are the published Tiselius form minus the magnesium and citrate
+/// terms' exponents being applied to inhibitor *activities*. `K_CaOx = 2.25`
+/// calibrates the index so that reference urine (Ca 3, Ox 0.3, Mg 3, Cit 2
+/// mmol/L at 2 L) sits just below the supersaturation threshold of 1.0 — the
+/// same constant, exponents and threshold as `AP_CAOX_K` / `apCaOx()` in
+/// src/engines/stoneSupersaturationEngine.js.
+pub fn ap_caox(
+    calcium_mmol: f64,
+    oxalate_mmol: f64,
+    magnesium_mmol: f64,
+    citrate_mmol: f64,
+    volume_l: f64,
+) -> f64 {
     if volume_l <= 0.0 {
         return 0.0;
     }
-    (calcium_mmol / volume_l) * (oxalate_mmol / volume_l) * 1e6
+    const K_CAOX: f64 = 2.25;
+    let ca = calcium_mmol.max(0.05);
+    let ox = oxalate_mmol.max(0.01);
+    let mg = magnesium_mmol.max(0.2);
+    let cit = citrate_mmol.max(0.05);
+    K_CAOX * ca.powf(1.07) * ox.powf(0.68) * mg.powf(-0.18) * cit.powf(-0.12) * volume_l.powf(-1.31)
 }
 
-/// Tiselius activity product for calcium phosphate with pH-dependent phosphate
-/// speciation (H₂PO₄⁻ / HPO₄²⁻ via pKa2 = 7.20).
+/// Tiselius activity product for calcium phosphate.
+///
+/// `AP(CaP) = K_CaP · Ca^1.34 · P^0.55 · (pH/6.5)^6.4 · V^-0.9`
+///
+/// pH enters through the brushite ion pair, whose activity rises steeply across
+/// the clinical 5.5–7.5 window (≈6×). `K_CaP = 0.239` anchors reference urine to
+/// ~2.9 at pH 6.5; the supersaturation threshold is 2.0. Identical to
+/// `AP_CAP_K` / `apCaP()` in src/engines/stoneSupersaturationEngine.js.
 pub fn ap_cap(calcium_mmol: f64, phosphate_mmol: f64, ph: f64, volume_l: f64) -> f64 {
     if volume_l <= 0.0 {
         return 0.0;
     }
-    let h = 10f64.powf(-ph);
-    let ka2 = 10f64.powf(-7.20);
-    let hpo4_fraction = ka2 / (h + ka2);
-    let ca = calcium_mmol / volume_l;
-    let po4 = (phosphate_mmol / volume_l) * hpo4_fraction;
-    ca.powf(1.0) * po4.powf(1.0) * 1e6
+    const K_CAP: f64 = 0.239;
+    let ca = calcium_mmol.max(0.05);
+    let p = phosphate_mmol.max(0.05);
+    K_CAP * ca.powf(1.34) * p.powf(0.55) * (ph.max(4.0) / 6.5).powf(6.4) * volume_l.powf(-0.9)
 }
 
 /// Uric acid solubility (mmol/L) as a function of pH (pKa1 = 5.35).
@@ -351,6 +379,21 @@ mod tests {
         let g = 10.0; // mmol/L ≈ 180 mg/dL
         assert_eq!(renal_excretion_mmol_min(&base, g), 0.0);
         assert!(renal_excretion_mmol_min(&sglt2, g) > 0.0);
+    }
+
+    #[test]
+    fn supersaturation_matches_the_js_engine() {
+        // Reference urine: Ca 3, Ox 0.3, Mg 3, Cit 2 mmol/L, 2 L.
+        // JS apCaOx() on the same inputs → 0.979 (just below the 1.0 cut);
+        // apCaP() at pH 6.5 → 2.900 (above the 2.0 cut).
+        let caox = ap_caox(3.0, 0.3, 3.0, 2.0, 2.0);
+        assert!((caox - 0.979).abs() < 0.01, "AP(CaOx)={caox}");
+        let cap = ap_cap(3.0, 20.0, 6.5, 2.0);
+        assert!((cap - 2.9).abs() < 0.05, "AP(CaP)={cap}");
+        // and the pH dependence must be steep: ~6x from 5.5 to 7.4
+        let acid = ap_cap(3.0, 20.0, 5.5, 2.0);
+        let alkaline = ap_cap(3.0, 20.0, 7.4, 2.0);
+        assert!(alkaline > acid * 4.0, "acid={acid} alkaline={alkaline}");
     }
 
     #[test]

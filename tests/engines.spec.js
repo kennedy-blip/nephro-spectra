@@ -259,6 +259,41 @@ describe('morphology classifier', () => {
     expect(b).toBe(a)
   })
 
+  it('feeds the classifier real shape moments (regression: they were undefined)', () => {
+    // computeBiometrics used to pass {skew, kurt} while classifyMorphology
+    // destructured {skewness, kurtosis}. Every skew/kurtosis rule was dead, the
+    // evidence panel rendered NaN, and the stricture plateau was being decided
+    // on geometry alone. `tQmax/tFlow = 0.559` with `skew = -2.19` is the
+    // signature of a fixed narrowing, so this case must be confident.
+    for (const preset of VOIDING_PRESETS) {
+      const ev = buildPreset(preset).metrics.morphology.evidence
+      expect(Number.isFinite(ev.skewness)).toBe(true)
+      expect(Number.isFinite(ev.excessKurtosis)).toBe(true)
+      expect(Math.abs(ev.skewness)).toBeGreaterThan(0)
+    }
+    const stricture = buildPreset(VOIDING_PRESETS.find((p) => p.id === 'stricture-plateau')).metrics
+    expect(stricture.skewness).toBeLessThan(-1.4)
+    expect(stricture.morphology.pattern).toBe('stricture_plateau')
+    expect(stricture.morphology.confidence).toBeGreaterThan(0.6)
+  })
+
+  it('treats a missing or non-finite moment as no evidence instead of NaN', () => {
+    const base = {
+      qMax: 22,
+      tQmax: 6,
+      tFlow: 30,
+      plateauRatio: 0.5,
+      interruptionCount: 0,
+      sex: 'male'
+    }
+    const clean = classifyMorphology({ ...base, skewness: 0.3, kurtosis: -0.2 })
+    const broken = classifyMorphology({ ...base, skewness: NaN, kurtosis: undefined })
+    expect(broken.pattern).toBe(clean.pattern)
+    for (const v of Object.values(broken.scores)) expect(Number.isFinite(v)).toBe(true)
+    expect(Number.isFinite(broken.confidence)).toBe(true)
+    expect(Number.isFinite(broken.evidence.skewness)).toBe(true)
+  })
+
   it('exposes a label for every morphotype', () => {
     for (const key of Object.keys(MORPHOLOGY_LABELS)) expect(MORPHOLOGY_LABELS[key]).toBeTruthy()
   })

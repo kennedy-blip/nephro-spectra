@@ -96,17 +96,26 @@ jobs:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
 
-      - name: Install the Android SDK
+      - name: Locate or install the Android SDK
         run: |
           set -euo pipefail
-          if [ -z "${ANDROID_HOME:-}" ]; then
+          if [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME" ]; then
+            echo "Using the runner's Android SDK at $ANDROID_HOME"
+          else
             echo "ANDROID_HOME=$HOME/android-sdk" >> "$GITHUB_ENV"
+            echo "No SDK on PATH — installing the command-line tools."
+            mkdir -p "$HOME/android-sdk/cmdline-tools"
+            curl -sSL -o /tmp/cmdline-tools.zip \
+              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q /tmp/cmdline-tools.zip -d "$HOME/android-sdk/cmdline-tools"
+            mv "$HOME/android-sdk/cmdline-tools/cmdline-tools" "$HOME/android-sdk/cmdline-tools/latest"
+            yes | "$HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+            "$HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager" \
+              "platform-tools" "platforms;android-34" "build-tools;34.0.0"
             export ANDROID_HOME="$HOME/android-sdk"
           fi
-          mkdir -p "$ANDROID_HOME"
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
-          sudo chown -R "$USER" "$ANDROID_HOME" 2>/dev/null || true
           echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+          cat android/local.properties
 
       - name: Install dependencies and build web assets
         run: |
@@ -301,7 +310,34 @@ jobs:
           targets: wasm32-unknown-unknown
       - name: Test the DSP crate
         working-directory: rust-nephro
-        run: cargo test --release --lib
+        run: |
+          set -o pipefail
+          cargo test --release --lib 2>&1 | tee /tmp/cargo-test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "::group::cargo test output"
+            grep -E "^(error|warning: unused)|panicked|FAILED|test result|--> " /tmp/cargo-test.log | head -80
+            echo "::endgroup::"
+            echo "::error::cargo test failed (exit $status) — see the artifact or the group above"
+            exit "$status"
+          fi
       - name: Build the WASM artefact
         working-directory: rust-nephro
-        run: cargo build --release --target wasm32-unknown-unknown
+        run: |
+          set -o pipefail
+          cargo build --release --target wasm32-unknown-unknown 2>&1 | tee /tmp/cargo-build.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "::group::cargo build output"
+            grep -E "^error" -A 6 /tmp/cargo-build.log | head -80
+            echo "::endgroup::"
+            exit "$status"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: cargo-logs
+          path: |
+            /tmp/cargo-test.log
+            /tmp/cargo-build.log
+          retention-days: 7
