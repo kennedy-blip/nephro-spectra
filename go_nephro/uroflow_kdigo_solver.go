@@ -184,20 +184,20 @@ type FlowSample struct {
 
 // Biometrics is the uroflowmetry summary computed from a trace.
 type Biometrics struct {
-	QMax          float64  `json:"qMax"`
-	QAvg          float64  `json:"qAvg"`
-	VVoided       float64  `json:"vVoided"`
-	TQmax         float64  `json:"tQmax"`
-	TFlow         float64  `json:"tFlow"`
-	PlateauRatio  float64  `json:"plateauRatio"`
-	Skewness      float64  `json:"skewness"`
-	Kurtosis      float64  `json:"kurtosis"`
-	Interruptions int      `json:"interruptionCount"`
+	QMax          float64    `json:"qMax"`
+	QAvg          float64    `json:"qAvg"`
+	VVoided       float64    `json:"vVoided"`
+	TQmax         float64    `json:"tQmax"`
+	TFlow         float64    `json:"tFlow"`
+	PlateauRatio  float64    `json:"plateauRatio"`
+	Skewness      float64    `json:"skewness"`
+	Kurtosis      float64    `json:"kurtosis"`
+	Interruptions int        `json:"interruptionCount"`
 	MorphCode     int        `json:"morphologyCode"`
 	Morphology    string     `json:"morphology"`
 	Nomogram      SirokyNorm `json:"nomogram"`
-	ZScore        float64  `json:"zScore"`
-	Flags         []string `json:"flags"`
+	ZScore        float64    `json:"zScore"`
+	Flags         []string   `json:"flags"`
 }
 
 func mean(xs []float64) float64 {

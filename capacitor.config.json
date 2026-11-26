@@ -2,15 +2,10 @@
   "appId": "com.nephrospectra.clinical",
   "appName": "NephroSpectra",
   "webDir": "dist",
-  "bundledWebRuntime": false,
   "android": {
     "allowMixedContent": false,
     "captureInput": true,
-    "webContentsDebuggingEnabled": false,
-    "includePlugins": [
-      "NephroAcousticFlow",
-      "NephroDipstickCamera"
-    ]
+    "webContentsDebuggingEnabled": false
   },
   "plugins": {
     "SplashScreen": {

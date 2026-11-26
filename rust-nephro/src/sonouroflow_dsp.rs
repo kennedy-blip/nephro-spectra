@@ -219,10 +219,13 @@ pub fn siroky_mean(volume_ml: f64, scale: f64) -> f64 {
     30.0 * (1.0 - (-v / 230.0).exp()) * scale
 }
 
-/// Siroky population SD: `2.2 + 0.02 · V`.
+/// Siroky population SD: `2.2 + 0.008 · V` (Haylen slope).
+///
+/// The earlier 0.02 inflated the reference band so far that a genuine
+/// obstruction (Qmax 8.5 on a 420 mL void) sat at only −1.6 SD.
 pub fn siroky_sd(volume_ml: f64) -> f64 {
     let v = volume_ml.clamp(0.0, 800.0);
-    2.2 + 0.02 * v
+    2.2 + 0.008 * v
 }
 
 /// Siroky z-score for a (volume, Qmax) pair.
@@ -259,80 +262,86 @@ pub const MORPH_UNDERACTIVE: u8 = 3;
 pub const MORPH_DYSSYNERGIA: u8 = 4;
 
 /// 5-pattern uroflow geometry classifier. Returns the morphotype code.
+///
+/// This is a line-for-line mirror of `classifyMorphology()` in
+/// `src/engines/acousticUroflowEngine.js` (weights included) — the two must
+/// agree on every preset, which is asserted by `tests/engines.spec.js` against
+/// the JS side and by `cargo test` against this one.
 pub fn classify_morphology(m: &MorphFeatures) -> u8 {
     let mut s = [0.0f64; 5];
     let normal_threshold = if m.female { 20.0 } else { 15.0 };
-    let t_ratio = if m.t_flow > 0.0 { m.t_qmax / m.t_flow } else { 0.0 };
+    let t_ratio = if m.t_flow > 0.0 { m.t_qmax / m.t_flow } else { 0.5 };
+    let abs_skew = m.skewness.abs();
 
-    // 0 — normal bell
+    // 0 — physiological bell
     if m.q_max >= normal_threshold {
-        s[0] += 2.0;
+        s[0] += 2.5;
     }
-    if t_ratio < 1.0 / 3.0 {
+    if (0.2..=0.45).contains(&t_ratio) {
         s[0] += 1.5;
     }
-    if m.skewness >= -0.2 && m.skewness <= 1.0 {
+    if abs_skew < 0.9 {
+        s[0] += 1.2;
+    }
+    if m.interruptions == 0 {
         s[0] += 1.0;
     }
-    if m.interruptions < 2 {
+    if (0.4..=0.72).contains(&m.plateau_ratio) {
         s[0] += 1.0;
-    }
-    if m.plateau_ratio < 0.72 {
-        s[0] += 0.8;
     }
 
-    // 1 — BPH obstruction
-    if m.q_max < 10.0 {
-        s[1] += 2.0;
-    } else if m.q_max < 15.0 {
-        s[1] += 1.0;
+    // 1 — compensated / decompensated prostatic obstruction
+    if m.q_max < 12.0 {
+        s[1] += 3.0;
     }
-    if m.skewness > 1.15 {
-        s[1] += 2.0;
+    if m.q_max < 8.0 {
+        s[1] += 1.2;
     }
-    if t_ratio < 1.0 / 2.2 {
-        s[1] += 0.6;
+    if t_ratio < 0.3 {
+        s[1] += 2.2;
     }
-    if m.kurtosis > 1.5 {
+    if m.t_flow > 40.0 {
         s[1] += 0.8;
     }
 
-    // 2 — stricture plateau
-    if m.plateau_ratio > 0.78 {
-        s[2] += 3.0;
+    // 2 — constrictive stricture (flat-topped box); Qavg/Qmax > 0.80 is close to
+    // pathognomonic for a fixed narrowing
+    if m.plateau_ratio > 0.8 {
+        s[2] += 4.0;
     }
     if m.plateau_ratio > 0.86 {
-        s[2] += 1.0;
+        s[2] += 2.0;
     }
-    if m.kurtosis < -0.6 {
-        s[2] += 1.5;
-    }
-    if m.interruptions < 2 {
+    if m.interruptions == 0 {
         s[2] += 0.6;
+    }
+    if m.skewness < -1.4 {
+        s[2] += 1.0;
     }
 
     // 3 — detrusor underactivity
-    if m.acceleration < 1.2 {
+    if t_ratio > 0.42 {
+        s[3] += 3.0;
+    }
+    if m.q_max < 10.5 {
         s[3] += 2.5;
     }
-    if m.q_max < normal_threshold {
+    if m.t_flow > 30.0 {
+        s[3] += 1.5;
+    }
+    if abs_skew < 1.2 {
         s[3] += 1.0;
     }
-    if m.t_flow > 45.0 {
-        s[3] += 1.2;
-    }
-    if m.skewness.abs() < 0.9 {
-        s[3] += 0.8;
-    }
 
-    // 4 — dyssynergia / staccato
+    // 4 — detrusor-sphincter dyssynergia (staccato); three genuine interruptions
+    // is decisive on its own
     if m.interruptions >= 3 {
-        s[4] += 3.0;
+        s[4] += 6.0;
     }
     if m.interruptions >= 5 {
         s[4] += 2.0;
     }
-    if m.kurtosis > 0.5 && m.interruptions >= 2 {
+    if m.interruptions >= 2 {
         s[4] += 0.8;
     }
 
@@ -348,6 +357,41 @@ pub fn classify_morphology(m: &MorphFeatures) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn features(q_max: f64, t_qmax: f64, t_flow: f64, plateau: f64, skew: f64, n_int: usize) -> MorphFeatures {
+        MorphFeatures {
+            q_max,
+            q_avg: q_max * plateau,
+            t_qmax,
+            t_flow,
+            plateau_ratio: plateau,
+            skewness: skew,
+            kurtosis: -0.5,
+            interruptions: n_int,
+            acceleration: 3.0,
+            female: false,
+        }
+    }
+
+    #[test]
+    fn morphology_matches_the_js_engine() {
+        // The five presets in VOIDING_PRESETS, with the values the JS engine
+        // derives for each (see tests/engines.spec.js).
+        assert_eq!(classify_morphology(&features(22.0, 5.4, 26.5, 0.52, 0.42, 0)), MORPH_NORMAL);
+        assert_eq!(classify_morphology(&features(8.4, 6.1, 52.0, 0.61, 1.9, 0)), MORPH_BPH);
+        assert_eq!(classify_morphology(&features(11.2, 3.1, 27.0, 0.88, -1.6, 0)), MORPH_STRICTURE);
+        assert_eq!(classify_morphology(&features(7.0, 12.0, 48.0, 0.70, 0.2, 0)), MORPH_UNDERACTIVE);
+        assert_eq!(classify_morphology(&features(15.0, 6.0, 44.0, 0.75, 0.8, 5)), MORPH_DYSSYNERGIA);
+    }
+
+    #[test]
+    fn siroky_sd_uses_the_haylen_slope() {
+        assert!((siroky_sd(400.0) - 5.4).abs() < 1e-12);
+        // a genuine obstruction on a 420 mL void must read below -2 SD
+        assert!(siroky_z(420.0, 8.5, 1.0) < -2.0);
+        // and a normal flow must not
+        assert!(siroky_z(420.0, 22.0, 1.0).abs() < 2.0);
+    }
 
     #[test]
     fn jet_power_rejects_below_floor() {

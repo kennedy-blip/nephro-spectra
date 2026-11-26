@@ -223,12 +223,12 @@ func UricAcidPanel(concMmol, ph float64) UricAcidProfile {
 
 // PassageInput describes a ureteral calculus.
 type PassageInput struct {
-	SizeMm              float64 `json:"sizeMm"`
-	Location            string  `json:"location"` // distal | mid | proximal
-	Hydronephrosis      bool    `json:"hydronephrosis"`
-	PriorIntervention   bool    `json:"priorIntervention"`
-	DurationDays        float64 `json:"durationDays"`
-	SymptomsControlled  bool    `json:"symptomsControlled"`
+	SizeMm             float64 `json:"sizeMm"`
+	Location           string  `json:"location"` // distal | mid | proximal
+	Hydronephrosis     bool    `json:"hydronephrosis"`
+	PriorIntervention  bool    `json:"priorIntervention"`
+	DurationDays       float64 `json:"durationDays"`
+	SymptomsControlled bool    `json:"symptomsControlled"`
 }
 
 // PassageResult is the spontaneous-passage prediction.
@@ -315,11 +315,11 @@ func StonePassage(in PassageInput) PassageResult {
 // RiskProfile aggregates the three stone families and names the dominant one,
 // each normalised by its own supersaturation threshold.
 type RiskProfile struct {
-	CaOx      IndexResult      `json:"caox"`
-	CaP       IndexResult      `json:"cap"`
-	UricAcid  UricAcidProfile  `json:"uricAcid"`
-	Dominant  string           `json:"dominant"`
-	Aggregate float64          `json:"aggregate"`
+	CaOx      IndexResult     `json:"caox"`
+	CaP       IndexResult     `json:"cap"`
+	UricAcid  UricAcidProfile `json:"uricAcid"`
+	Dominant  string          `json:"dominant"`
+	Aggregate float64         `json:"aggregate"`
 }
 
 // StoneRiskProfile evaluates all three stone families for one urine sample.

@@ -10,11 +10,14 @@
     "preview": "vite preview --host 0.0.0.0",
     "cap:sync": "npx cap sync android",
     "apk": "npx cap sync android && cd android && ./gradlew assembleRelease",
-    "test": "vitest run && npm run lint:workflow && npm run test:java",
+    "test": "vitest run && npm run lint:workflow && npm run test:java && npm run test:rust && npm run fmt:go:check",
     "test:watch": "vitest",
     "test:java": "node scripts/check-java.mjs",
     "lint:workflow": "node scripts/lint-workflow.mjs",
-    "verify": "npm run test && npm run build"
+    "verify": "npm run test && npm run build",
+    "fmt:go": "node scripts/gofmt.mjs",
+    "fmt:go:check": "node scripts/gofmt.mjs --check",
+    "test:rust": "node scripts/check-rust.mjs"
   },
   "dependencies": {
     "vue": "^3.5.13"
@@ -25,10 +28,13 @@
     "@capacitor/core": "^6.2.4",
     "@vitejs/plugin-vue": "^5.2.1",
     "@vue/test-utils": "^2.4.6",
+    "@wasm-fmt/gofmt": "^0.7.3",
     "java-parser": "^3.0.1",
     "js-yaml": "^5.5.0",
     "jsdom": "^25.0.1",
+    "tree-sitter-wasms": "^0.1.13",
     "vite": "^6.0.7",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "web-tree-sitter": "^0.25.10"
   }
 }

@@ -3,9 +3,10 @@
 //	GET|POST /api/nephro_biochem?op=<operation>
 //
 // Operations
-//   stonesupersaturation  → Tiselius AP(CaOx)/AP(CaP), uric-acid speciation
-//   uroflowkdigo          → Siroky nomogram, morphotype, KDIGO staging, KFRE
-//   health                → runtime + version probe used by the inspector
+//
+//	stonesupersaturation  → Tiselius AP(CaOx)/AP(CaP), uric-acid speciation
+//	uroflowkdigo          → Siroky nomogram, morphotype, KDIGO staging, KFRE
+//	health                → runtime + version probe used by the inspector
 //
 // The handler is deliberately dependency-free (stdlib only) so `go build`
 // succeeds on Vercel without a module download step. It is POST-friendly
@@ -102,12 +103,12 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	switch op {
 	case "health":
 		base.Data = map[string]interface{}{
-			"status":      "ok",
-			"goVersion":   runtime.Version(),
-			"goroutines":  runtime.NumGoroutine(),
-			"numCPU":      runtime.NumCPU(),
-			"operations":  []string{"stonesupersaturation", "uroflowkdigo", "health"},
-			"serverTime":  time.Now().UTC().Format(time.RFC3339),
+			"status":     "ok",
+			"goVersion":  runtime.Version(),
+			"goroutines": runtime.NumGoroutine(),
+			"numCPU":     runtime.NumCPU(),
+			"operations": []string{"stonesupersaturation", "uroflowkdigo", "health"},
+			"serverTime": time.Now().UTC().Format(time.RFC3339),
 		}
 		base.ElapsedMs = msSince(started)
 		writeJSON(w, http.StatusOK, base)
