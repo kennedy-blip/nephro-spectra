@@ -313,6 +313,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - name: Report the Rust toolchain
+        run: |
+          which cargo || echo "cargo not on PATH"
+          cargo --version || true
+          rustc --version || true
       - name: Test the DSP crate
         working-directory: rust-nephro
         run: |
