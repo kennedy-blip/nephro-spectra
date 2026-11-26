@@ -99,23 +99,25 @@ jobs:
       - name: Locate or install the Android SDK
         run: |
           set -euo pipefail
-          if [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME" ]; then
+          if [ -n "${ANDROID_HOME:-}" ] && [ -x "$ANDROID_HOME/platform-tools/adb" -o -d "$ANDROID_HOME/platforms" ]; then
             echo "Using the runner's Android SDK at $ANDROID_HOME"
           else
-            echo "ANDROID_HOME=$HOME/android-sdk" >> "$GITHUB_ENV"
-            echo "No SDK on PATH — installing the command-line tools."
-            mkdir -p "$HOME/android-sdk/cmdline-tools"
+            SDK="$HOME/android-sdk"
+            echo "No usable SDK found — installing the command-line tools into $SDK"
+            mkdir -p "$SDK/cmdline-tools"
             curl -sSL -o /tmp/cmdline-tools.zip \
               https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-            unzip -q /tmp/cmdline-tools.zip -d "$HOME/android-sdk/cmdline-tools"
-            mv "$HOME/android-sdk/cmdline-tools/cmdline-tools" "$HOME/android-sdk/cmdline-tools/latest"
-            yes | "$HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-            "$HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager" \
-              "platform-tools" "platforms;android-34" "build-tools;34.0.0"
-            export ANDROID_HOME="$HOME/android-sdk"
+            unzip -q /tmp/cmdline-tools.zip -d "$SDK/cmdline-tools"
+            mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"
+            yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+            "$SDK/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+            echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+            echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+            export ANDROID_HOME="$SDK"
           fi
-          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
-          cat android/local.properties
+          echo "sdk.dir=${ANDROID_HOME}" > android/local.properties
+          echo "--- local.properties ---"; cat android/local.properties
+          ls "${ANDROID_HOME}/platforms" 2>/dev/null || echo "::warning::no platforms directory yet"
 
       - name: Install dependencies and build web assets
         run: |
@@ -131,7 +133,10 @@ jobs:
       - name: Sync the built web assets into the Android project
         run: |
           set -euo pipefail
-          test -f android/app/build.gradle || (echo '::error::android/ project missing'; exit 1)
+          if [ ! -f android/app/build.gradle ]; then
+            echo "::error::android/ project missing"
+            exit 1
+          fi
           npx cap sync android
 
       - name: Bootstrap the native host
