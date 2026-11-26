@@ -1,0 +1,35 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+dist-ssr/
+*.local
+
+# Capacitor / Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/app/src/main/assets/public/
+*.keystore
+*.jks
+
+# signed artefacts — the APK is a release asset, not source
+public/releases/*.apk
+
+# rust
+rust-nephro/target/
+rust-nephro/pkg/
+
+# editors & OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.log
+npm-debug.log*
+
+# test output
+coverage/
+.vitest/

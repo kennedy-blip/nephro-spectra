@@ -1,0 +1,241 @@
+name: Build and Bundle APK
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  JAVA_VERSION: '17'
+  APK_NAME: nephro-spectra-v28.0.0.apk
+
+jobs:
+  verify-web:
+    name: Web build · 0% TypeScript gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Assert zero TypeScript
+        run: |
+          set -euo pipefail
+          echo "::group::TypeScript artefact scan"
+          FOUND=$(find . \
+            -path ./node_modules -prune -o \
+            -path ./.git -prune -o \
+            \( -name '*.ts' -o -name '*.tsx' -o -name 'tsconfig.json' \) -print | tee /dev/stderr | wc -l)
+          if [ "$FOUND" -ne 0 ]; then
+            echo "::error::Found $FOUND TypeScript artefact(s); NEPHRO-SPECTRA is a 0.0% TypeScript project."
+            exit 1
+          fi
+          if grep -rn 'lang="ts"' --include='*.vue' src 2>/dev/null | grep -q .; then
+            echo '::error::A .vue file declares lang="ts".'
+            exit 1
+          fi
+          echo "Zero TypeScript artefacts confirmed."
+          echo "::endgroup::"
+
+      - name: Lint GLSL uniforms against shader contract
+        run: |
+          set -euo pipefail
+          for uniform in u_time u_flowRateMlSec u_supersaturationIndex u_hydrationUsg u_pointer u_gyroTilt; do
+            grep -q "uniform .* ${uniform};" src/shaders/renal_fluid_underlay.glsl \
+              || { echo "::error::renal_fluid_underlay.glsl is missing ${uniform}"; exit 1; }
+          done
+          echo "Underlay uniform contract satisfied."
+
+      - name: Run the engine + component test suite
+        run: npm test
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Upload web bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: nephro-spectra-web
+          path: dist
+          retention-days: 14
+
+  build-apk:
+    name: Capacitor sync · Gradle release · sign
+    needs: verify-web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install dependencies and build web assets
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Install Capacitor CLI
+        run: npm install --no-save @capacitor/cli@6 @capacitor/core@6 @capacitor/android@6
+
+      - name: Materialise the Android project
+        run: |
+          set -euo pipefail
+          if [ ! -f android/app/build.gradle ]; then
+            npx cap add android
+          fi
+          npx cap sync android --inline
+
+      - name: Register native plugins and package id
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re, pathlib
+          cfg = pathlib.Path('capacitor.config.json').read_text()
+          manifest = pathlib.Path('android/app/src/main/AndroidManifest.xml')
+          if manifest.exists():
+              text = manifest.read_text()
+              text = re.sub(r'package="[^"]*"', 'package="com.nephrospectra.clinical"', text, count=1)
+              if 'RECORD_AUDIO' not in text:
+                  text = text.replace(
+                      '<application',
+                      '<uses-permission android:name="android.permission.RECORD_AUDIO" />\n'
+                      '    <uses-permission android:name="android.permission.CAMERA" />\n'
+                      '    <application',
+                      1,
+                  )
+              manifest.write_text(text)
+          print('appId from', cfg.split('appId')[1].split(',')[0].strip())
+          PY
+          python3 - <<'PY'
+          import pathlib, re
+          plugins = pathlib.Path('android/app/src/main/java/com/nephrospectra/plugins')
+          assert plugins.exists(), 'native plugin sources missing'
+          for f in plugins.glob('*.java'):
+              print('plugin source:', f.name)
+          main = pathlib.Path('android/app/src/main/java/com/nephrospectra/clinical/MainActivity.java')
+          if main.exists():
+              text = main.read_text()
+              if 'registerPlugin(NephroAcousticFlowPlugin.class' not in text:
+                  imports = (
+                      'import com.nephrospectra.plugins.NephroAcousticFlowPlugin;\n'
+                      'import com.nephrospectra.plugins.NephroDipstickCameraPlugin;\n'
+                  )
+                  text = text.replace('import com.getcapacitor.BridgeActivity;',
+                                      'import com.getcapacitor.BridgeActivity;\n' + imports, 1)
+                  text = text.replace('super.onCreate(savedInstanceState);',
+                      'registerPlugin(NephroAcousticFlowPlugin.class);\n'
+                      '        registerPlugin(NephroDipstickCameraPlugin.class);\n'
+                      '        super.onCreate(savedInstanceState);', 1)
+                  main.write_text(text)
+                  print('registered native plugins in MainActivity')
+          PY
+
+      - name: Assemble release APK
+        working-directory: android
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Sign the APK
+        id: sign
+        run: |
+          set -euo pipefail
+          KEYSTORE="nephro-release.keystore"
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
+          else
+            keytool -genkeypair -v -keystore "$KEYSTORE" -alias nephro -keyalg RSA \
+              -keysize 2048 -validity 10000 -storepass nephrospectra -keypass nephrospectra \
+              -dname "CN=NEPHRO-SPECTRA, OU=Clinical Systems, O=NephroSpectra, L=Nairobi, C=KE"
+          fi
+          UNSIGNED=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
+          echo "unsigned=$UNSIGNED"
+          if command -v apksigner >/dev/null 2>&1; then
+            apksigner sign --ks "$KEYSTORE" --ks-pass pass:nephrospectra \
+              --key-pass pass:nephrospectra --out "public/releases/${APK_NAME}" "$UNSIGNED"
+            apksigner verify --verbose "public/releases/${APK_NAME}"
+          else
+            cp "$UNSIGNED" "public/releases/${APK_NAME}"
+          fi
+          ls -l public/releases/
+          echo "sha256=$(sha256sum "public/releases/${APK_NAME}" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c%s "public/releases/${APK_NAME}")" >> "$GITHUB_OUTPUT"
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+
+      - name: Publish APK artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nephro-spectra-apk
+          path: public/releases/${{ env.APK_NAME }}
+          retention-days: 30
+
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: public/releases/${{ env.APK_NAME }}
+          generate_release_notes: true
+          body: |
+            NEPHRO-SPECTRA ${{ github.ref_name }}
+
+            SHA-256: `${{ steps.sign.outputs.sha256 }}`
+            Size: ${{ steps.sign.outputs.size }} bytes
+            Package: `com.nephrospectra.clinical`
+            Stack: Vue 3.5 · Rust/WASM DSP · Go 1.22 · Java 17 · GLSL ES 3.00 · 0.0% TypeScript
+
+  go-verify:
+    name: Go serverless kernels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Vet and build the API package
+        run: |
+          set -euo pipefail
+          go mod init nephro-spectra 2>/dev/null || true
+          gofmt -l api go_nephro | tee /tmp/unformatted
+          test ! -s /tmp/unformatted || (echo '::error::Go sources need gofmt'; exit 1)
+          go vet ./api/... ./go_nephro/...
+          go build ./...
+
+  rust-verify:
+    name: Rust DSP crate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Test the DSP crate
+        working-directory: rust-nephro
+        run: cargo test --release --lib
+      - name: Build the WASM artefact
+        working-directory: rust-nephro
+        run: cargo build --release --target wasm32-unknown-unknown

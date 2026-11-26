@@ -1,0 +1,33 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "rewrites": [
+    { "source": "/api/nephro", "destination": "/api/nephro_biochem" }
+  ],
+  "headers": [
+    {
+      "source": "/releases/(.*).apk",
+      "rewrites": [
+    { "source": "/api/nephro", "destination": "/api/nephro_biochem" }
+  ],
+  "headers": [
+        { "key": "Content-Type", "value": "application/vnd.android.package-archive" },
+        { "key": "Content-Disposition", "value": "attachment; filename=nephro-spectra-v28.0.0.apk" }
+      ]
+    },
+    {
+      "source": "/(.*)",
+      "rewrites": [
+    { "source": "/api/nephro", "destination": "/api/nephro_biochem" }
+  ],
+  "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Permissions-Policy", "value": "microphone=(self), camera=(self), gyroscope=(self), accelerometer=(self)" }
+      ]
+    }
+  ]
+}

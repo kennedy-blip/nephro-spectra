@@ -1,0 +1,26 @@
+{
+  "name": "nephro-spectra",
+  "private": true,
+  "version": "28.0.0",
+  "type": "module",
+  "description": "NEPHRO-SPECTRA \u2014 acoustic voiding sonouroflowmetry, chrono-gated 10-pad CIEDE2000 urinalysis, Tiselius stone supersaturation, Bergman-Hovorka glycemic/renal threshold and KDIGO eGFR / urology CPT audit workstation.",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "cap:sync": "npx cap sync android",
+    "apk": "npx cap sync android && cd android && ./gradlew assembleRelease",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "@vue/test-utils": "^2.4.6",
+    "jsdom": "^25.0.1",
+    "vite": "^6.0.7",
+    "vitest": "^2.1.8"
+  }
+}
