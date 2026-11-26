@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  NEPHRO-SPECTRA network policy.
+  Release builds are TLS-only; cleartext is never permitted because the vault
+  synchronises clinical records with Supabase.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

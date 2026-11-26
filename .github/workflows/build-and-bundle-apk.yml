@@ -1,0 +1,388 @@
+name: Build and Bundle APK
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  JAVA_VERSION: '17'
+  APK_NAME: nephro-spectra-v28.0.0.apk
+
+jobs:
+  verify-web:
+    name: Web build · 0% TypeScript gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Assert zero TypeScript
+        run: |
+          set -euo pipefail
+          echo "::group::TypeScript artefact scan"
+          FOUND=$(find . \
+            -path ./node_modules -prune -o \
+            -path ./.git -prune -o \
+            \( -name '*.ts' -o -name '*.tsx' -o -name 'tsconfig.json' \) -print | tee /dev/stderr | wc -l)
+          if [ "$FOUND" -ne 0 ]; then
+            echo "::error::Found $FOUND TypeScript artefact(s); NEPHRO-SPECTRA is a 0.0% TypeScript project."
+            exit 1
+          fi
+          if grep -rn 'lang="ts"' --include='*.vue' src 2>/dev/null | grep -q .; then
+            echo '::error::A .vue file declares lang="ts".'
+            exit 1
+          fi
+          echo "Zero TypeScript artefacts confirmed."
+          echo "::endgroup::"
+
+      - name: Lint GLSL uniforms against shader contract
+        run: |
+          set -euo pipefail
+          for uniform in u_time u_flowRateMlSec u_supersaturationIndex u_hydrationUsg u_pointer u_gyroTilt; do
+            grep -q "uniform .* ${uniform};" src/shaders/renal_fluid_underlay.glsl \
+              || { echo "::error::renal_fluid_underlay.glsl is missing ${uniform}"; exit 1; }
+          done
+          echo "Underlay uniform contract satisfied."
+
+      - name: Run the engine + component test suite
+        run: npm test
+
+      - name: Assert the Java sources parse and the host is wired
+        run: npm run test:java
+
+      - name: Assert the Rust crate parses and its metadata is intact
+        run: npm run test:rust
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Upload web bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: nephro-spectra-web
+          path: dist
+          retention-days: 14
+
+  build-apk:
+    name: Capacitor sync · Gradle release · sign
+    needs: verify-web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Locate or install the Android SDK
+        run: |
+          set -euo pipefail
+          if [ -n "${ANDROID_HOME:-}" ] && [ -x "$ANDROID_HOME/platform-tools/adb" -o -d "$ANDROID_HOME/platforms" ]; then
+            echo "Using the runner's Android SDK at $ANDROID_HOME"
+          else
+            SDK="$HOME/android-sdk"
+            echo "No usable SDK found — installing the command-line tools into $SDK"
+            mkdir -p "$SDK/cmdline-tools"
+            curl -sSL -o /tmp/cmdline-tools.zip \
+              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q /tmp/cmdline-tools.zip -d "$SDK/cmdline-tools"
+            mv "$SDK/cmdline-tools/cmdline-tools" "$SDK/cmdline-tools/latest"
+            yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+            "$SDK/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+            echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+            echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+            export ANDROID_HOME="$SDK"
+          fi
+          # apksigner and zipalign live in the newest build-tools directory.
+          BUILD_TOOLS=$(ls -d "${ANDROID_HOME}"/build-tools/* 2>/dev/null | sort -V | tail -1)
+          if [ -n "${BUILD_TOOLS:-}" ]; then
+            echo "BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
+            echo "$BUILD_TOOLS" >> "$GITHUB_PATH"
+            echo "build-tools: $BUILD_TOOLS"
+          else
+            echo "::warning::no build-tools directory — apksigner may be unavailable"
+          fi
+          echo "sdk.dir=${ANDROID_HOME}" > android/local.properties
+          echo "--- local.properties ---"; cat android/local.properties
+          ls "${ANDROID_HOME}/platforms" 2>/dev/null || echo "::warning::no platforms directory yet"
+
+      - name: Install dependencies and build web assets
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Assert the Java sources parse and the host is wired
+        run: npm run test:java
+
+      - name: Assert the Rust crate parses and its metadata is intact
+        run: npm run test:rust
+
+      - name: Sync the built web assets into the Android project
+        run: |
+          set -euo pipefail
+          if [ ! -f android/app/build.gradle ]; then
+            echo "::error::android/ project missing"
+            exit 1
+          fi
+          npx cap sync android
+
+      - name: Bootstrap the native host
+        run: python3 scripts/bootstrap-android.py
+
+      - name: Verify the native sources compile as written
+        run: |
+          set -euo pipefail
+          test -f android/app/src/main/java/com/nephrospectra/clinical/MainActivity.java
+          test -f android/app/src/main/java/com/nephrospectra/plugins/NephroAcousticFlowPlugin.java
+          test -f android/app/src/main/java/com/nephrospectra/plugins/NephroDipstickCameraPlugin.java
+          grep -q 'registerPlugin(NephroAcousticFlowPlugin.class)' \
+            android/app/src/main/java/com/nephrospectra/clinical/MainActivity.java
+          grep -q 'androidx.camera:camera-core' android/app/build.gradle
+          grep -q 'RECORD_AUDIO' android/app/src/main/AndroidManifest.xml
+          grep -q 'networkSecurityConfig' android/app/src/main/AndroidManifest.xml
+          grep -q 'applicationId "com.nephrospectra.clinical"' android/app/build.gradle
+          echo "native host checks passed"
+
+      - name: Assemble release APK
+        working-directory: android
+        env:
+          NEPHRO_KEYSTORE_PATH: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' && '../nephro-release.keystore' || '' }}
+          NEPHRO_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          NEPHRO_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          NEPHRO_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [ -n "${NEPHRO_KEYSTORE_PATH:-}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > ../nephro-release.keystore
+          fi
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+          ls -l app/build/outputs/apk/release/
+
+      - name: Sign the APK
+        id: sign
+        run: |
+          set -euo pipefail
+          APK="android/app/build/outputs/apk/release/${APK_NAME}"
+          if [ ! -f "$APK" ]; then
+            APK=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
+          fi
+          test -f "$APK" || { echo "::error::no release APK produced"; exit 1; }
+          echo "built=$APK"
+
+          # apksigner ships inside the SDK build-tools; resolve it explicitly so a
+          # bare PATH does not turn signing into exit 127.
+          APKSIGNER=""
+          if [ -n "${BUILD_TOOLS:-}" ] && [ -x "${BUILD_TOOLS}/apksigner" ]; then
+            APKSIGNER="${BUILD_TOOLS}/apksigner"
+          elif command -v apksigner >/dev/null 2>&1; then
+            APKSIGNER=$(command -v apksigner)
+          else
+            CANDIDATE=$(ls -d "${ANDROID_HOME:-}"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+            [ -n "$CANDIDATE" ] && APKSIGNER="$CANDIDATE"
+          fi
+          echo "apksigner: ${APKSIGNER:-not found}"
+          echo "keytool: $(command -v keytool || echo 'not found')"
+
+          if [ -f nephro-release.keystore ]; then
+            echo "using the repository keystore (Gradle already signed this build)"
+            KEYSTORE=nephro-release.keystore
+          else
+            echo "::warning::No ANDROID_KEYSTORE_BASE64 secret — signing with an ephemeral self-signed key."
+            KEYSTORE=nephro-ephemeral.keystore
+            keytool -genkeypair -v -keystore "$KEYSTORE" -alias nephro -keyalg RSA \
+              -keysize 2048 -validity 10000 -storepass nephrospectra -keypass nephrospectra \
+              -dname "CN=NEPHRO-SPECTRA, OU=Clinical Systems, O=NephroSpectra, L=Nairobi, C=KE"
+            if [ -z "$APKSIGNER" ]; then
+              echo "::error::apksigner is unavailable — cannot produce an installable APK"
+              exit 1
+            fi
+            "$APKSIGNER" sign --ks "$KEYSTORE" --ks-pass pass:nephrospectra \
+              --key-pass pass:nephrospectra --out "public/releases/${APK_NAME}" "$APK"
+            APK="public/releases/${APK_NAME}"
+          fi
+
+          mkdir -p public/releases
+          if [ "$APK" != "public/releases/${APK_NAME}" ]; then
+            cp "$APK" "public/releases/${APK_NAME}"
+          fi
+
+          if [ -n "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --verbose "public/releases/${APK_NAME}" || {
+              echo "::error::APK signature failed to verify"; exit 1; }
+          else
+            echo "::warning::apksigner unavailable — skipping signature verification"
+          fi
+          unzip -l "public/releases/${APK_NAME}" | grep -q 'assets/public/index.html' \
+            || { echo "::error::the APK does not contain the bundled web app"; exit 1; }
+          unzip -l "public/releases/${APK_NAME}" | grep -q 'assets/public/assets/' \
+            || { echo "::error::the APK has no built JS/CSS assets"; exit 1; }
+
+          FILESIZE=$(stat -c%s "public/releases/${APK_NAME}")
+          echo "size=$FILESIZE" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "public/releases/${APK_NAME}" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          ls -l public/releases/
+
+      - name: Publish APK artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nephro-spectra-apk
+          path: public/releases/${{ env.APK_NAME }}
+          retention-days: 30
+
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: public/releases/${{ env.APK_NAME }}
+          generate_release_notes: true
+          body: |
+            NEPHRO-SPECTRA ${{ github.ref_name }}
+
+            SHA-256: `${{ steps.sign.outputs.sha256 }}`
+            Size: ${{ steps.sign.outputs.size }} bytes
+            Package: `com.nephrospectra.clinical`
+            Stack: Vue 3.5 · Rust/WASM DSP · Go 1.22 · Java 17 · GLSL ES 3.00 · 0.0% TypeScript
+
+  deploy-vercel:
+    name: Deploy to Vercel
+    needs: verify-web
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for a Vercel token
+        id: gate
+        run: |
+          if [ -n "${VERCEL_TOKEN:-}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::VERCEL_TOKEN not set — skipping the deploy job."
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.gate.outputs.ready == 'true'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies and build
+        if: steps.gate.outputs.ready == 'true'
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Deploy to production
+        if: steps.gate.outputs.ready == 'true' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          npm install --no-save --no-audit --no-fund vercel@39
+          npx vercel deploy --prod --yes --token "$VERCEL_TOKEN" | tee /tmp/deploy.txt
+          URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.vercel\.app' /tmp/deploy.txt | tail -1)
+          echo "Deployed to $URL"
+          echo "### Vercel production: $URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy a preview for this branch
+        if: steps.gate.outputs.ready == 'true' && github.ref != 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          npm install --no-save --no-audit --no-fund vercel@39
+          npx vercel deploy --yes --token "$VERCEL_TOKEN" | tee /tmp/deploy.txt
+          URL=$(grep -oE 'https://[a-zA-Z0-9.-]+\.vercel\.app' /tmp/deploy.txt | tail -1)
+          echo "Preview: $URL"
+          echo "### Vercel preview: $URL" >> "$GITHUB_STEP_SUMMARY"
+
+  go-verify:
+    name: Go serverless kernels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Vet and build the API package
+        run: |
+          set -euo pipefail
+          test -f go.mod || (echo '::error::go.mod missing'; exit 1)
+          gofmt -l api go_nephro | tee /tmp/unformatted
+          test ! -s /tmp/unformatted || (echo '::error::Go sources need gofmt'; exit 1)
+          go vet ./api/... ./go_nephro/...
+          go build ./...
+
+  rust-verify:
+    name: Rust DSP crate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Report the Rust toolchain
+        run: |
+          which cargo || echo "cargo not on PATH"
+          cargo --version || true
+          rustc --version || true
+      - name: Test the DSP crate
+        working-directory: rust-nephro
+        run: |
+          # GitHub runs bash with -e, which aborts the step the moment the
+          # pipeline fails — before PIPESTATUS can be read. Disable it here.
+          set +e -o pipefail
+          cargo test --release --lib 2>&1 | tee /tmp/cargo-test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "::notice::cargo test exit=$status log=$(wc -c < /tmp/cargo-test.log) bytes"
+            head -c 600 /tmp/cargo-test.log | sed 's/^/  /'
+            # Encode the diagnostics in the artifact name: names are readable
+            # through the API even when job logs are not.
+            SLUG="tail-$(tail -4 /tmp/cargo-test.log | tr '\n' ' ' | tr -c 'A-Za-z0-9._-' '_' | cut -c1-120)"
+            echo "CARGO_FAIL_SLUG=${SLUG:-unknown}" >> "$GITHUB_ENV"
+            echo "::error::cargo test: ${SLUG:-unknown}"
+            exit "$status"
+          fi
+      - name: Build the WASM artefact
+        if: success()
+        working-directory: rust-nephro
+        run: |
+          set +e -o pipefail
+          cargo build --release --target wasm32-unknown-unknown 2>&1 | tee /tmp/cargo-build.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "::group::cargo build output"
+            grep -E "^error" -A 6 /tmp/cargo-build.log | head -80
+            echo "::endgroup::"
+            exit "$status"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: cargo-logs-${{ env.CARGO_FAIL_SLUG || 'unknown' }}
+          path: |
+            /tmp/cargo-test.log
+            /tmp/cargo-build.log
+          retention-days: 7

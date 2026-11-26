@@ -1,0 +1,35 @@
+{
+  "appId": "com.nephrospectra.clinical",
+  "appName": "NephroSpectra",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": false
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 900,
+      "backgroundColor": "#060d18",
+      "showSpinner": false
+    },
+    "StatusBar": {
+      "style": "DARK",
+      "backgroundColor": "#060d18"
+    },
+    "NephroAcousticFlow": {
+      "sampleRate": 48000,
+      "frameSize": 2048,
+      "calibrationFrames": 8,
+      "posture": "seated"
+    },
+    "NephroDipstickCamera": {
+      "padCount": 10,
+      "orientation": "vertical",
+      "sampleIntervalMs": 220
+    }
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}
